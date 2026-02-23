@@ -25,6 +25,19 @@ PRINT_INTERVAL = 0.1  # seconds between terminal updates
 CALIBRATION_SECONDS = 5    # how long to listen for the noise floor
 PEAK_OFFSET_DB = 40.0      # dB above the noise floor that maps to 100
 
+# ── Bar display ─────────────────────────────────────────────────────
+BAR_WIDTH = 50
+GREEN_CEIL = 40.0    # scores below this are green
+YELLOW_CEIL = 70.0   # scores below this (but >= green) are yellow; above is red
+
+# ANSI escape codes
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_RED = "\033[31m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
 
 def list_devices() -> None:
     """Print every audio device the system can see, then exit."""
@@ -55,6 +68,54 @@ def hype_score(current_db: float, floor_db: float, ceiling_db: float) -> float:
         return 0.0
     raw = (current_db - floor_db) / (ceiling_db - floor_db) * 100.0
     return float(np.clip(raw, 0.0, 100.0))
+
+
+def _zone_color(score: float) -> str:
+    """Return the ANSI color code for the current hype zone."""
+    if score < GREEN_CEIL:
+        return _GREEN
+    if score < YELLOW_CEIL:
+        return _YELLOW
+    return _RED
+
+
+def _zone_label(score: float) -> str:
+    """A short text tag for the current hype zone."""
+    if score < GREEN_CEIL:
+        return "Chill"
+    if score < YELLOW_CEIL:
+        return "Hyped"
+    return "PEAK!"
+
+
+def render_bar(score: float) -> str:
+    """Build a color-coded bar string.
+
+    Each filled block is colored according to the zone it falls in:
+      positions 0–39 %  → green
+      positions 40–69 % → yellow
+      positions 70–100% → red
+    """
+    filled = int(BAR_WIDTH * score / 100.0)
+    green_end = int(BAR_WIDTH * GREEN_CEIL / 100.0)
+    yellow_end = int(BAR_WIDTH * YELLOW_CEIL / 100.0)
+
+    bar = ""
+    for i in range(BAR_WIDTH):
+        if i < filled:
+            if i < green_end:
+                color = _GREEN
+            elif i < yellow_end:
+                color = _YELLOW
+            else:
+                color = _RED
+            bar += f"{color}{_BOLD}\u2588{_RESET}"
+        else:
+            bar += f"{_DIM}-{_RESET}"
+
+    zone_color = _zone_color(score)
+    label = _zone_label(score)
+    return f"  {bar}  {zone_color}{_BOLD}{score:5.1f}{_RESET}  {zone_color}{label}{_RESET}"
 
 
 def calibrate(device: int) -> float:
@@ -160,10 +221,7 @@ def main() -> None:
 
             db = rms_to_db(avg_rms)
             score = hype_score(db, floor_db, ceiling_db)
-            bar_w = 40
-            filled = int(bar_w * score / 100.0)
-            bar = "#" * filled + "-" * (bar_w - filled)
-            sys.stdout.write(f"\r  [{bar}]  Hype: {score:5.1f}  ")
+            sys.stdout.write(f"\r{render_bar(score)}   ")
             sys.stdout.flush()
 
     try:
