@@ -1,106 +1,119 @@
 """
-Crowd Energy Meter — measures how loud and energetic the audience is
-by listening to the microphone in real time and printing a visual bar.
+Crowd Energy Meter — reads live audio from a Focusrite interface
+and prints the RMS amplitude to the terminal every ~100 ms.
+
+QUICK START
+-----------
+1.  pip install -r requirements.txt
+2.  python main.py --list-devices      (find your Focusrite device number)
+3.  python main.py --device 5          (replace 5 with your number)
 """
 
 import sys
+import time
+import argparse
 import numpy as np
 import sounddevice as sd
-from scipy.signal import welch
 
-# ── Settings you can tweak ──────────────────────────────────────────
-SAMPLE_RATE = 44100        # audio samples per second (CD quality)
-BLOCK_DURATION = 0.1       # seconds of audio analysed per update
-BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
-BAR_WIDTH = 40             # max width of the energy bar in characters
-QUIET_DB = 40.0            # dB level that counts as "silent"
-LOUD_DB = 90.0             # dB level that counts as "max energy"
-ENERGY_BAND_HZ = (300, 4000)  # frequency range where crowd cheers live
+# ── Audio settings ──────────────────────────────────────────────────
+SAMPLE_RATE = 44100   # Hz
+BLOCK_SIZE = 1024     # samples per chunk
+PRINT_INTERVAL = 0.1  # seconds between terminal updates
 
 
-def rms_db(samples: np.ndarray) -> float:
-    """Return the loudness of an audio block in decibels (dB)."""
-    rms = np.sqrt(np.mean(samples ** 2))
-    if rms < 1e-10:
-        return 0.0
-    return 20 * np.log10(rms)
+def list_devices() -> None:
+    """Print every audio device the system can see, then exit."""
+    print("\nAvailable audio devices:\n")
+    print(sd.query_devices())
+    print(
+        "\nLook for your Focusrite interface in the list above.\n"
+        "The number on the left is the device index.\n"
+        "Pass it with:  python main.py --device <number>\n"
+    )
 
 
-def band_energy_ratio(samples: np.ndarray, fs: int,
-                      band: tuple[float, float]) -> float:
-    """What fraction of total energy sits inside the given frequency band.
-
-    A high ratio means the sound is dominated by crowd-cheer frequencies
-    rather than low rumble or high-pitched feedback.
-    """
-    freqs, power = welch(samples, fs=fs, nperseg=min(len(samples), 1024))
-    total = power.sum()
-    if total < 1e-20:
-        return 0.0
-    mask = (freqs >= band[0]) & (freqs <= band[1])
-    return float(power[mask].sum() / total)
+def rms_amplitude(samples: np.ndarray) -> float:
+    """Root-mean-square amplitude of an audio buffer (linear, 0.0–1.0)."""
+    return float(np.sqrt(np.mean(samples ** 2)))
 
 
-def energy_score(db: float, band_ratio: float) -> float:
-    """Combine loudness and spectral shape into a 0-100 energy score."""
-    loudness_pct = np.clip((db - QUIET_DB) / (LOUD_DB - QUIET_DB), 0, 1)
-    score = (0.7 * loudness_pct + 0.3 * band_ratio) * 100
-    return round(float(score), 1)
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Crowd Energy Meter — live RMS from a Focusrite input."
+    )
+    parser.add_argument(
+        "--list-devices", action="store_true",
+        help="Show all audio devices and exit.",
+    )
+    parser.add_argument(
+        "--device", type=int, default=None,
+        help="Input device index (run --list-devices to find it).",
+    )
+    args = parser.parse_args()
 
+    if args.list_devices:
+        list_devices()
+        return
 
-def label_for(score: float) -> str:
-    """Turn a numeric score into a human-readable vibe label."""
-    if score < 15:
-        return "Crickets..."
-    if score < 35:
-        return "Warming up"
-    if score < 55:
-        return "Getting into it!"
-    if score < 75:
-        return "Crowd is LIVE"
-    return "ABSOLUTE BANGER"
+    if args.device is None:
+        print(
+            "ERROR: No device specified.\n"
+            "Run  python main.py --list-devices  to see available devices,\n"
+            "then  python main.py --device <number>  to start.\n"
+        )
+        sys.exit(1)
 
+    device_info = sd.query_devices(args.device)
+    device_name = device_info["name"]
+    max_channels = device_info["max_input_channels"]
+    if max_channels < 1:
+        print(f"ERROR: Device {args.device} ({device_name}) has no input channels.")
+        sys.exit(1)
 
-def print_bar(score: float) -> None:
-    """Print a single-line energy bar that updates in place."""
-    filled = int(BAR_WIDTH * min(score, 100) / 100)
-    bar = "#" * filled + "-" * (BAR_WIDTH - filled)
-    tag = label_for(score)
-    sys.stdout.write(f"\r  [{bar}] {score:5.1f}%  {tag}    ")
-    sys.stdout.flush()
-
-
-def audio_callback(indata, frames, time_info, status):
-    """Called automatically by sounddevice for each audio block."""
-    if status:
-        print(f"\n  (audio warning: {status})", file=sys.stderr)
-
-    samples = indata[:, 0]  # mono — use first channel
-    db = rms_db(samples)
-    ratio = band_energy_ratio(samples, SAMPLE_RATE, ENERGY_BAND_HZ)
-    score = energy_score(db, ratio)
-    print_bar(score)
-
-
-def main():
-    print("=" * 56)
+    print("=" * 58)
     print("  CROWD ENERGY METER  —  press Ctrl+C to stop")
-    print("=" * 56)
+    print("=" * 58)
+    print(f"  Device : [{args.device}] {device_name}")
+    print(f"  Rate   : {SAMPLE_RATE} Hz")
+    print(f"  Block  : {BLOCK_SIZE} samples")
+    print(f"  Print  : every {int(PRINT_INTERVAL * 1000)} ms")
     print()
 
+    rms_accumulator: list[float] = []
+    last_print = time.monotonic()
+
+    def audio_callback(indata, frames, time_info, status):
+        nonlocal last_print
+        if status:
+            print(f"\n  (audio warning: {status})", file=sys.stderr)
+
+        samples = indata[:, 0]
+        rms_accumulator.append(rms_amplitude(samples))
+
+        now = time.monotonic()
+        if now - last_print >= PRINT_INTERVAL:
+            avg_rms = float(np.mean(rms_accumulator))
+            rms_accumulator.clear()
+            last_print = now
+            sys.stdout.write(f"\r  RMS: {avg_rms:.6f}  ")
+            sys.stdout.flush()
+
     try:
-        with sd.InputStream(samplerate=SAMPLE_RATE,
-                            blocksize=BLOCK_SIZE,
-                            channels=1,
-                            callback=audio_callback):
-            print("  Listening on default microphone ...\n")
+        with sd.InputStream(
+            device=args.device,
+            samplerate=SAMPLE_RATE,
+            blocksize=BLOCK_SIZE,
+            channels=1,
+            callback=audio_callback,
+        ):
+            print("  Listening …\n")
             while True:
-                sd.sleep(100)
+                sd.sleep(50)
     except KeyboardInterrupt:
-        print("\n\n  Stopped. Rock on!")
+        print("\n\n  Stopped.")
     except sd.PortAudioError as e:
-        print(f"\n  Could not open microphone: {e}")
-        print("  Make sure a mic is connected and not in use by another app.")
+        print(f"\n  Could not open device {args.device}: {e}")
+        print("  Make sure the Focusrite is connected and powered on.")
         sys.exit(1)
 
 
