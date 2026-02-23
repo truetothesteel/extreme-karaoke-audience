@@ -85,7 +85,7 @@ def _zone_label(score: float) -> str:
         return "Chill"
     if score < YELLOW_CEIL:
         return "Hyped"
-    return "PEAK!"
+    return "EXTREME AUDIENCE POWER"
 
 
 def render_bar(score: float) -> str:
