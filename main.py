@@ -12,6 +12,7 @@ QUICK START
 
 import sys
 import time
+import socket
 import argparse
 import numpy as np
 import sounddevice as sd
@@ -24,6 +25,10 @@ PRINT_INTERVAL = 0.1  # seconds between terminal updates
 # ── Calibration & scoring ───────────────────────────────────────────
 CALIBRATION_SECONDS = 5    # how long to listen for the noise floor
 PEAK_OFFSET_DB = 40.0      # dB above the noise floor that maps to 100
+
+# ── UDP broadcast ───────────────────────────────────────────────────
+UDP_IP = "127.0.0.1"
+UDP_PORT = 5005
 
 # ── Bar display ─────────────────────────────────────────────────────
 BAR_WIDTH = 50
@@ -160,6 +165,10 @@ def main() -> None:
         "--peak-offset", type=float, default=PEAK_OFFSET_DB,
         help="dB above the noise floor that equals Hype 100 (default: 40).",
     )
+    parser.add_argument(
+        "--udp-port", type=int, default=UDP_PORT,
+        help="Local UDP port to broadcast the Hype Score on (default: 5005).",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -187,6 +196,7 @@ def main() -> None:
     print(f"  Device : [{args.device}] {device_name}")
     print(f"  Rate   : {SAMPLE_RATE} Hz")
     print(f"  Block  : {BLOCK_SIZE} samples")
+    print(f"  UDP    : {UDP_IP}:{args.udp_port}")
     print()
 
     # ── Phase 1: calibrate ──────────────────────────────────────────
@@ -203,6 +213,9 @@ def main() -> None:
     print()
 
     # ── Phase 2: live metering ──────────────────────────────────────
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_dest = (UDP_IP, args.udp_port)
+
     rms_accumulator: list[float] = []
     last_print = time.monotonic()
 
@@ -223,6 +236,7 @@ def main() -> None:
             score = hype_score(db, floor_db, ceiling_db)
             sys.stdout.write(f"\r{render_bar(score)}   ")
             sys.stdout.flush()
+            udp_sock.sendto(f"{score:.1f}".encode(), udp_dest)
 
     try:
         with sd.InputStream(
@@ -241,6 +255,8 @@ def main() -> None:
         print(f"\n  Could not open device {args.device}: {e}")
         print("  Make sure the Focusrite is connected and powered on.")
         sys.exit(1)
+    finally:
+        udp_sock.close()
 
 
 if __name__ == "__main__":
